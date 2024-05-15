@@ -285,7 +285,7 @@ def add_network_components(network, input_dict):
                  carrier=st_reservoir['carrier'].tolist(),
                  p_nom=st_reservoir['p_nom'].tolist(), p_nom_extendable=False,
                  max_hours=st_reservoir['max_hours'].to_list(),
-                 p_max_pu=st_reservoir['p_max_pu'].to_list(),#dispatch_reservoir,
+                 p_max_pu=dispatch_reservoir,
                  p_min_pu = 0,
                  efficiency_dispatch=st_reservoir['efficiency_dispatch'].tolist(),
                  efficiency_store=st_reservoir['efficiency_store'].tolist(),
