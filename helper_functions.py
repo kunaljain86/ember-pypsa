@@ -3,20 +3,52 @@ import pandas as pd
 import random
 import google.auth
 import pygsheets
+import sys
 
 
-# parameters
-P_MIN_NUCLEAR = 0.4
-
-def load_data(input_data, load_data_source):
-    if load_data_source == 'local':
-        data_dict = load_data_locally(input_data)
-    if load_data_source == 'remote':
-        data_dict = load_data_from_google_sheet(input_data)
+def get_input_data_sources(regions:list, data:list) -> list:
+    data_sources = [i[1] for i in zip(regions, data) if i[0] == True]
+    if "" in data_sources:
+        data_sources.remove("")
+        print("Warning: check countries selected have valid input data sources. Empty string in input data.")
+    return data_sources
+    
+def load_data(input_data_sources:list, load_data_source:str) -> dict:
+    input_data_dicts = []
+    
+    for source in input_data_sources:
+        if load_data_source == 'local':
+            input_data_dicts.append(load_data_locally(source))
+        if load_data_source == 'remote':
+            input_data_dicts.append(load_data_from_google_sheet(source))
+    data_dict = concat_data(input_data_dicts)
     return data_dict
 
-def load_data_locally(DATA_FILE):
-    dfs = pd.read_excel(DATA_FILE, sheet_name=None, index_col=0, parse_dates=True)
+def concat_data(input_data_dicts:dict) -> dict:
+    data_dict = {}
+    for sheet_dict in input_data_dicts:
+        for tab in sheet_dict.keys():
+            new_df = sheet_dict[tab]
+            # remove empty column headers
+            if "" in new_df.columns:
+                new_df = new_df.drop([""], axis=1)
+            # if tab doesnt exist, fill with df from sheet_dict
+            if tab not in data_dict.keys():
+                data_dict[tab] = new_df
+            # if tab already there, append to existing df
+            else:
+                existing_df = data_dict[tab]
+                # if timeseries, concat horizontally 
+                if "timeseries" in tab:
+                    updated_df = pd.concat([existing_df, new_df], axis=1)
+                else:
+                    updated_df = pd.concat([existing_df, new_df], axis=0)
+                data_dict[tab] = updated_df
+    return data_dict
+
+    
+def load_data_locally(data_file):
+    dfs = pd.read_excel(data_file, sheet_name=None, index_col=0, parse_dates=True)
     return dfs
 
 def load_data_from_google_sheet(url):
@@ -32,7 +64,7 @@ def load_data_from_google_sheet(url):
     dfs = {}
     sheet_names = [s.title for s in sheet.worksheets()]
     for wsheet_title in sheet_names:
-        df = sheet.worksheet_by_title(wsheet_title).get_as_df()
+        df = sheet.worksheet_by_title(wsheet_title).get_as_df(include_tailing_empty=False)
         new_index = df.iloc[:, 0]
         df.set_index(new_index, inplace=True)
         df = df.iloc[:, 1:]
@@ -43,7 +75,7 @@ def load_data_from_google_sheet(url):
     return dfs
 
 
-def add_network_components(network, input_dict):
+def add_network_components(network, input_dict, p_min_nuclear):
     print("adding links")
     links = input_dict['links']
     network.madd("Link", links.index,
@@ -56,14 +88,14 @@ def add_network_components(network, input_dict):
                  marginal_cost=gen_cbf['marginal_cost'].to_list())
     
     print("adding loads")
-    load = input_dict['load']
+    load = input_dict['load_timeseries']
     network.madd("Load", load.columns, bus=load.columns, p_set=load)
-    load_hydrogen = input_dict['load_hydrogen']
+    load_hydrogen = input_dict['load_hydrogen_timeseries']
     network.madd("Load", load_hydrogen.columns, bus=load_hydrogen.columns, p_set=load_hydrogen, carrier='Hydrogen')
 
     print("adding RES generation")
     gen_pv = input_dict['gen_pv']
-    pv = input_dict['pv']
+    pv = input_dict['pv_timeseries']
     network.madd('Generator',
                  gen_pv['bus'],
                  suffix='_PV',
@@ -75,7 +107,7 @@ def add_network_components(network, input_dict):
                  p_max_pu=pv)
 
     gen_wind = input_dict['gen_wind']
-    wind = input_dict['wind']
+    wind = input_dict['wind_timeseries']
     network.madd('Generator',
                  gen_wind['bus'],
                  suffix='_Wind',
@@ -87,7 +119,7 @@ def add_network_components(network, input_dict):
                  p_max_pu=wind)
 
     gen_wind_offshore = input_dict['gen_wind_offshore']
-    wind_offshore = input_dict['wind_offshore']
+    wind_offshore = input_dict['wind_offshore_timeseries']
     network.madd('Generator',
                  gen_wind_offshore['bus'],
                  suffix='_Wind_offshore',
@@ -131,8 +163,8 @@ def add_network_components(network, input_dict):
                  )
     print("adding bio, hydro + nuclear")
     gen_nuclear = input_dict['gen_nuclear']
-    chp = input_dict['chp']
-    nuclear_p_max_time_series, nuclear_p_min_time_series = create_nuclear_timeseries(chp, gen_nuclear, P_MIN_NUCLEAR)
+    chp = input_dict['chp_timeseries']
+    nuclear_p_max_time_series, nuclear_p_min_time_series = create_nuclear_timeseries(chp, gen_nuclear, p_min_nuclear)
     network.madd('Generator',
                  gen_nuclear.index,
                  bus=gen_nuclear['bus'].to_list(),
@@ -168,7 +200,7 @@ def add_network_components(network, input_dict):
                  p_max_pu=gen_biogas['p_max_pu'].to_list()
                  )
     gen_ror = input_dict['gen_ror']
-    ror = input_dict['ror']
+    ror = input_dict['ror_timeseries']
     network.madd('Generator',
                  gen_ror['bus'],
                  suffix='_ROR',
@@ -258,7 +290,7 @@ def add_network_components(network, input_dict):
                  efficiency=gen_res_chp['efficiency'].to_list()
                  )
     gen_bio_chp = input_dict['gen_bio_chp']
-    chp_bio = input_dict['chp_bio']
+    chp_bio = input_dict['chp_bio_timeseries']
     network.madd('Generator',
                  gen_bio_chp.index,
                  bus=gen_bio_chp['bus'].to_list(),
@@ -279,8 +311,8 @@ def add_network_components(network, input_dict):
                  standing_loss=st_hps['standing_loss'].tolist())
 
     st_reservoir = input_dict['st_reservoir']
-    dispatch_reservoir = input_dict['dispatch_reservoir']
-    inflow_reservoir = input_dict['inflow_reservoir']
+    dispatch_reservoir = input_dict['dispatch_reservoir_timeseries']
+    inflow_reservoir = input_dict['inflow_reservoir_timeseries']
     network.madd("StorageUnit", st_reservoir.index , bus=st_reservoir['bus'].tolist(),
                  carrier=st_reservoir['carrier'].tolist(),
                  p_nom=st_reservoir['p_nom'].tolist(), p_nom_extendable=False,
@@ -328,10 +360,10 @@ def create_chp_timeseries(chp, gen_gas_chp, gen_coal_chp, gen_oil_chp, gen_res_c
     res_chp_timeseries=chp_unit_profile(chp, gen_res_chp)
     return gas_chp_timeseries, coal_chp_timeseries, oil_chp_timeseries, res_chp_timeseries
 
-def create_nuclear_timeseries(chp, gen_nuclear, P_MIN_NUCLEAR):
+def create_nuclear_timeseries(chp, gen_nuclear, p_min_nuclear):
     # create nuclear time series to replicate maintenance profile
     nuclear_p_max_time_series, nuclear_p_min_time_series = apply_nuclear_outages(chp, gen_nuclear,
-                                                                                 nuclear_p_min=P_MIN_NUCLEAR,
+                                                                                 nuclear_p_min=p_min_nuclear,
                                                                                  french_nucl_cf=0.85,
                                                                                  other_nucl_cf=0.95)
     return nuclear_p_max_time_series, nuclear_p_min_time_series
