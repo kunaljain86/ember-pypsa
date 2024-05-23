@@ -1,6 +1,340 @@
 import numpy as np
 import pandas as pd
 import random
+import google.auth
+import pygsheets
+
+
+# parameters
+P_MIN_NUCLEAR = 0.4
+
+def load_data(input_data, load_data_source):
+    if load_data_source == 'local':
+        data_dict = load_data_locally(input_data)
+    if load_data_source == 'remote':
+        data_dict = load_data_from_google_sheet(input_data)
+    return data_dict
+
+def load_data_locally(DATA_FILE):
+    dfs = pd.read_excel(DATA_FILE, sheet_name=None, index_col=0, parse_dates=True)
+    return dfs
+
+def load_data_from_google_sheet(url):
+    # worksheet details
+    sheets_scope = [ "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    credentials, _ = google.auth.default(scopes=sheets_scope)
+    gs = pygsheets.authorize(custom_credentials=credentials)
+    sheet = gs.open_by_url(url)
+
+    ## read worksheets
+    dfs = {}
+    sheet_names = [s.title for s in sheet.worksheets()]
+    for wsheet_title in sheet_names:
+        df = sheet.worksheet_by_title(wsheet_title).get_as_df()
+        new_index = df.iloc[:, 0]
+        df.set_index(new_index, inplace=True)
+        df = df.iloc[:, 1:]
+        if df.index.name == 't':
+            df.index = pd.to_datetime(df.index, format="%d/%m/%Y %H:%M:%S")
+        dfs[wsheet_title] = df
+
+    return dfs
+
+
+def add_network_components(network, input_dict):
+    print("adding links")
+    links = input_dict['links']
+    network.madd("Link", links.index,
+                 bus0=links['bus0'].tolist(), bus1=links['bus1'].tolist(),
+                 p_nom=links['p_nom'].tolist(), p_max_pu=links['p_max_pu'].to_list())
+    
+    gen_cbf = input_dict['gen_cbf']
+    network.madd("Generator", gen_cbf.index, suffix='_CBF', carrier='CBF',
+                 bus=gen_cbf.index.tolist(), p_nom=gen_cbf['p_nom'].to_list(), p_nom_extendable=False,
+                 marginal_cost=gen_cbf['marginal_cost'].to_list())
+    
+    print("adding loads")
+    load = input_dict['load']
+    network.madd("Load", load.columns, bus=load.columns, p_set=load)
+    load_hydrogen = input_dict['load_hydrogen']
+    network.madd("Load", load_hydrogen.columns, bus=load_hydrogen.columns, p_set=load_hydrogen, carrier='Hydrogen')
+
+    print("adding RES generation")
+    gen_pv = input_dict['gen_pv']
+    pv = input_dict['pv']
+    network.madd('Generator',
+                 gen_pv['bus'],
+                 suffix='_PV',
+                 bus=gen_pv['bus'].to_list(),
+                 p_nom_extendable=False,
+                 p_nom=gen_pv['p_nom'].to_list(),
+                 carrier='PV',
+                 marginal_cost=gen_pv['marginal_cost'].to_list(),
+                 p_max_pu=pv)
+
+    gen_wind = input_dict['gen_wind']
+    wind = input_dict['wind']
+    network.madd('Generator',
+                 gen_wind['bus'],
+                 suffix='_Wind',
+                 bus=gen_wind['bus'].to_list(),
+                 p_nom_extendable=False,
+                 p_nom=gen_wind['p_nom'].to_list(),
+                 carrier='Wind',
+                 marginal_cost=gen_wind['marginal_cost'].to_list(),
+                 p_max_pu=wind)
+
+    gen_wind_offshore = input_dict['gen_wind_offshore']
+    wind_offshore = input_dict['wind_offshore']
+    network.madd('Generator',
+                 gen_wind_offshore['bus'],
+                 suffix='_Wind_offshore',
+                 bus=gen_wind_offshore['bus'].to_list(),
+                 p_nom_extendable=False,
+                 p_nom=gen_wind_offshore['p_nom'].to_list(),
+                 carrier='Wind offshore',
+                 marginal_cost=gen_wind_offshore['marginal_cost'].to_list(),
+                 p_max_pu=wind_offshore)
+
+    print("adding fossil fuel generation")
+    gen_gas = input_dict['gen_gas']
+    network.madd('Generator',
+                 gen_gas.index,
+                 bus=gen_gas['bus'].to_list(),
+                 p_nom_extendable=False,
+                 p_nom=gen_gas['p_nom'].to_list(),
+                 carrier=gen_gas['carrier'].to_list(),
+                 marginal_cost=gen_gas['marginal_cost'].to_list(),
+                 efficiency=gen_gas['efficiency'].to_list()
+                 )
+    gen_oil = input_dict['gen_oil']
+    network.madd('Generator',
+                 gen_oil.index,
+                 bus=gen_oil['bus'].to_list(),
+                 p_nom_extendable=False,
+                 p_nom=gen_oil['p_nom'].to_list(),
+                 carrier='Oil',
+                 marginal_cost=gen_oil['marginal_cost'].to_list(),
+                 efficiency=gen_oil['efficiency'].to_list()
+                 )
+    gen_coal = input_dict['gen_coal']
+    network.madd('Generator',
+                 gen_coal.index,
+                 bus=gen_coal['bus'].to_list(),
+                 p_nom_extendable=False,
+                 p_nom=gen_coal['p_nom'].to_list(),
+                 carrier=gen_coal['carrier'].to_list(),
+                 marginal_cost=gen_coal['marginal_cost'].to_list(),
+                 efficiency=gen_coal['efficiency'].to_list()
+                 )
+    print("adding bio, hydro + nuclear")
+    gen_nuclear = input_dict['gen_nuclear']
+    chp = input_dict['chp']
+    nuclear_p_max_time_series, nuclear_p_min_time_series = create_nuclear_timeseries(chp, gen_nuclear, P_MIN_NUCLEAR)
+    network.madd('Generator',
+                 gen_nuclear.index,
+                 bus=gen_nuclear['bus'].to_list(),
+                 p_nom_extendable=False,
+                 p_nom=gen_nuclear['p_nom'].to_list(),
+                 carrier='Nuclear',
+                 marginal_cost=gen_nuclear['marginal_cost'].to_list(),
+                 efficiency=gen_nuclear['efficiency'].to_list(),
+                 p_max_pu=nuclear_p_max_time_series,
+                 p_min_pu=nuclear_p_min_time_series
+                 )
+    gen_biomass = input_dict['gen_biomass']
+    network.madd('Generator',
+                 gen_biomass.index,
+                 bus=gen_biomass['bus'].to_list(),
+                 p_nom_extendable=False,
+                 p_nom=gen_biomass['p_nom'].to_list(),
+                 carrier=gen_biomass['carrier'].to_list(),
+                 marginal_cost=gen_biomass['marginal_cost'].to_list(),
+                 efficiency=gen_biomass['efficiency'].to_list(),
+                 p_max_pu=gen_biomass['p_max_pu'].to_list()
+                 )
+    gen_biogas = input_dict['gen_biogas']
+    network.madd('Generator',
+                 gen_biogas['bus'],
+                 suffix='_Biogas',
+                 bus=gen_biogas['bus'].to_list(),
+                 p_nom_extendable=False,
+                 p_nom=gen_biogas['p_nom'].to_list(),
+                 carrier='Biogas',
+                 marginal_cost=gen_biogas['marginal_cost'].to_list(),
+                 efficiency=gen_biogas['efficiency'].to_list(),
+                 p_max_pu=gen_biogas['p_max_pu'].to_list()
+                 )
+    gen_ror = input_dict['gen_ror']
+    ror = input_dict['ror']
+    network.madd('Generator',
+                 gen_ror['bus'],
+                 suffix='_ROR',
+                 bus=gen_ror['bus'].to_list(),
+                 p_nom_extendable=False,
+                 p_nom=gen_ror['p_nom'].to_list(),
+                 carrier=gen_ror['carrier'].to_list(),
+                 marginal_cost=gen_ror['marginal_cost'].to_list(),
+                 p_max_pu=ror
+                 )
+    gen_other_res = input_dict['gen_other_res']
+    network.madd('Generator',
+                 gen_other_res['bus'],
+                 suffix='_OtherRES',
+                 bus=gen_other_res['bus'].to_list(),
+                 p_nom_extendable=False,
+                 p_nom=gen_other_res['p_nom'].to_list(),
+                 carrier='Other RES',
+                 marginal_cost=gen_other_res['marginal_cost'].to_list(),
+                 p_max_pu=gen_other_res['p_max_pu'].to_list()
+                 )
+    gen_dsr = input_dict['gen_dsr']
+    network.madd('Generator',
+                 gen_dsr['bus'],
+                 suffix='_DSR',
+                 bus=gen_dsr['bus'].to_list(),
+                 p_nom_extendable=False,
+                 p_nom=gen_dsr['p_nom'].to_list(),
+                 carrier='DSR',
+                 marginal_cost=gen_dsr['marginal_cost'].to_list(),
+                 p_max_pu=gen_dsr['p_max_pu'].to_list()
+                 )
+
+    print("adding CHPs")
+    gen_gas_chp = input_dict['gen_gas_chp']
+    gen_coal_chp = input_dict['gen_coal_chp']
+    gen_oil_chp = input_dict['gen_oil_chp']
+    gen_res_chp = input_dict['gen_res_chp']
+    gas_chp_timeseries, coal_chp_timeseries, oil_chp_timeseries, res_chp_timeseries = \
+        create_chp_timeseries(chp,gen_gas_chp,gen_coal_chp,gen_oil_chp, gen_res_chp)
+
+    network.madd('Generator',
+                 gen_gas_chp.index,
+                 bus=gen_gas_chp['bus'].to_list(),
+                 p_nom_extendable=False,
+                 p_nom=gen_gas_chp['p_nom'].to_list(),
+                 carrier=gen_gas_chp['carrier'].to_list(),
+                 marginal_cost=gen_gas_chp['marginal_cost'].to_list(),
+                 p_max_pu=gas_chp_timeseries,
+                 p_min_pu=0.9 * gas_chp_timeseries,
+                 efficiency=gen_gas_chp['efficiency'].to_list()
+                 )
+
+    network.madd('Generator',
+                 gen_coal_chp.index,
+                 bus=gen_coal_chp['bus'].to_list(),
+                 p_nom_extendable=False,
+                 p_nom=gen_coal_chp['p_nom'].to_list(),
+                 carrier=gen_coal_chp['carrier'].to_list(),
+                 marginal_cost=gen_coal_chp['marginal_cost'].to_list(),
+                 p_max_pu=coal_chp_timeseries,
+                 p_min_pu=0.9 * coal_chp_timeseries,
+                 efficiency=gen_coal_chp['efficiency'].to_list()
+                 )
+
+    network.madd('Generator',
+                 gen_oil_chp.index,
+                 bus=gen_oil_chp['bus'].to_list(),
+                 p_nom_extendable=False,
+                 p_nom=gen_oil_chp['p_nom'].to_list(),
+                 carrier=gen_oil_chp['carrier'].to_list(),
+                 marginal_cost=gen_oil_chp['marginal_cost'].to_list(),
+                 p_max_pu=oil_chp_timeseries,
+                 p_min_pu=0.9 * oil_chp_timeseries,
+                 efficiency=gen_oil_chp['efficiency'].to_list()
+                 )
+
+    network.madd('Generator',
+                 gen_res_chp.index,
+                 bus=gen_res_chp['bus'].to_list(),
+                 p_nom_extendable=False,
+                 p_nom=gen_res_chp['p_nom'].to_list(),
+                 carrier=gen_res_chp['carrier'].to_list(),
+                 marginal_cost=gen_res_chp['marginal_cost'].to_list(),
+                 p_max_pu=res_chp_timeseries,
+                 p_min_pu=0.9 * res_chp_timeseries,
+                 efficiency=gen_res_chp['efficiency'].to_list()
+                 )
+    gen_bio_chp = input_dict['gen_bio_chp']
+    chp_bio = input_dict['chp_bio']
+    network.madd('Generator',
+                 gen_bio_chp.index,
+                 bus=gen_bio_chp['bus'].to_list(),
+                 p_nom_extendable=False,
+                 p_nom=gen_bio_chp['p_nom'].to_list(),
+                 carrier=gen_bio_chp['carrier'].to_list(),
+                 marginal_cost=gen_bio_chp['marginal_cost'].to_list(),
+                 p_max_pu=chp_bio,
+                 p_min_pu=chp_bio * 0.9,
+                 efficiency=gen_bio_chp['efficiency'].to_list()
+                 )
+    print("adding storage")
+    st_hps = input_dict['st_hps']
+    network.madd("StorageUnit", st_hps.index, bus=st_hps['bus'].tolist(), carrier=st_hps['carrier'].tolist(),
+                 p_nom=st_hps['p_nom'].tolist(), p_nom_extendable=False, max_hours=st_hps['max_hours'].to_list(),
+                 p_max_pu=st_hps['p_max_pu'].tolist(),
+                 efficiency_dispatch=st_hps['efficiency_dispatch'].tolist(),
+                 standing_loss=st_hps['standing_loss'].tolist())
+
+    st_reservoir = input_dict['st_reservoir']
+    dispatch_reservoir = input_dict['dispatch_reservoir']
+    inflow_reservoir = input_dict['inflow_reservoir']
+    network.madd("StorageUnit", st_reservoir.index , bus=st_reservoir['bus'].tolist(),
+                 carrier=st_reservoir['carrier'].tolist(),
+                 p_nom=st_reservoir['p_nom'].tolist(), p_nom_extendable=False,
+                 max_hours=st_reservoir['max_hours'].to_list(),
+                 p_max_pu=dispatch_reservoir,
+                 p_min_pu = 0,
+                 efficiency_dispatch=st_reservoir['efficiency_dispatch'].tolist(),
+                 efficiency_store=st_reservoir['efficiency_store'].tolist(),
+                 standing_loss=0,
+                 cyclic_state_of_charge = True,
+                 state_of_charge_initial=st_reservoir['state_of_charge_initial'].tolist(),
+                 inflow = inflow_reservoir
+                 )
+    st_battery = input_dict['st_battery']
+    network.madd("StorageUnit", st_battery.index, bus=st_battery['bus'].tolist(), carrier=st_battery['carrier'].tolist(),
+                 p_nom=st_battery['p_nom'].tolist(), p_nom_extendable=False, max_hours=st_battery['max_hours'].to_list(),
+                 p_max_pu=st_battery['p_max_pu'].tolist(),
+                 efficiency_dispatch=st_battery['efficiency_dispatch'].tolist(),
+                 standing_loss=st_battery['standing_loss'].tolist())
+    st_other = input_dict['st_other']
+    network.madd("StorageUnit", st_other.index, bus=st_other['bus'].tolist(), carrier=st_other['carrier'].tolist(),
+                 p_nom=st_other['p_nom'].tolist(), p_nom_extendable=False, max_hours=st_other['max_hours'].to_list(),
+                 p_max_pu=st_other['p_max_pu'].tolist(),
+                 efficiency_dispatch=st_other['efficiency_dispatch'].tolist(),
+                 standing_loss=st_other['standing_loss'].tolist())
+    links_electrolysis = input_dict['links_electrolysis']
+    network.madd("Link", links_electrolysis.index,
+                 bus0=links_electrolysis['bus0'].tolist(), bus1=links_electrolysis['bus1'].tolist(),
+                 p_nom=links_electrolysis['p_nom'].tolist(),
+                 p_nom_extendable=links_electrolysis['p_nom_extendable'].tolist(),
+                 carrier=links_electrolysis['carrier'].tolist(),
+                 efficiency=links_electrolysis['efficiency'].tolist())
+    st_hydrogen = input_dict['st_hydrogen']
+    network.madd("Store", st_hydrogen.index, bus=st_hydrogen['bus'].tolist(), carrier=st_hydrogen['carrier'].tolist(),
+                 e_nom=st_hydrogen['e_nom'].tolist(), e_nom_extendable=False, e_cyclic=True)
+
+    return network
+
+
+def create_chp_timeseries(chp, gen_gas_chp, gen_coal_chp, gen_oil_chp, gen_res_chp):
+    # create chp timeseries based on country temperature profile
+    gas_chp_timeseries=chp_unit_profile(chp, gen_gas_chp)
+    coal_chp_timeseries=chp_unit_profile(chp, gen_coal_chp)
+    oil_chp_timeseries=chp_unit_profile(chp, gen_oil_chp)
+    res_chp_timeseries=chp_unit_profile(chp, gen_res_chp)
+    return gas_chp_timeseries, coal_chp_timeseries, oil_chp_timeseries, res_chp_timeseries
+
+def create_nuclear_timeseries(chp, gen_nuclear, P_MIN_NUCLEAR):
+    # create nuclear time series to replicate maintenance profile
+    nuclear_p_max_time_series, nuclear_p_min_time_series = apply_nuclear_outages(chp, gen_nuclear,
+                                                                                 nuclear_p_min=P_MIN_NUCLEAR,
+                                                                                 french_nucl_cf=0.85,
+                                                                                 other_nucl_cf=0.95)
+    return nuclear_p_max_time_series, nuclear_p_min_time_series
 
 
 def apply_nuclear_outages(source_for_time_index:pd.DataFrame, gen_nuclear:pd.DataFrame, nuclear_p_min: float, french_nucl_cf:float, other_nucl_cf:float) -> pd.DataFrame:
@@ -65,31 +399,6 @@ def apply_nuclear_outage_profile(column:pd.Series, french_nucl_cf:float, other_n
     return pd.Series(index=index_timeseries, data=nuclear_time_series, name=country)
 
 
-def apply_ramping(row:pd.DataFrame) -> int:
-    """
-    This function creates 'min_up_time' (ramping) for grouped generators
-
-    Parameters
-    ----------
-        row: pd.DataFrame
-            function applies to row from gas unit dataframe
-    Returns
-    -------
-        int:
-            ramp up time
-    """
-    # apply gas min_ramp_up time (hours)
-    # 3/4 hour start up time for ccgts
-    if row['type'] == 'CC':
-        if row['age'] == 'new':
-            ramp = 3
-        else:
-            ramp = 4
-    # 0 gas cold start time for ocgts
-    else:
-        ramp=0
-    return ramp
-
 
 def chp_unit_profile(chp:pd.DataFrame, original_df:pd.DataFrame) -> pd.DataFrame:
     """
@@ -143,21 +452,4 @@ def create_maintenance_profile(cf:float) ->list[float]:
     return values
 
 
-def grouped_gas_ramping(gen_gas:pd.DataFrame) -> pd.DataFrame:
-    """
-    This function groups gas generators by age, country and technology (type) and creates parameter 'min_up_time' for grouped generators
-
-    Parameters
-    ----------
-        gen_gas: pd.DataFrame
-            dataframe with all gas generator units
-    Returns
-    -------
-        pd.DataFrame:
-            dataframe with gas generators grouped by age, country & technology and min_up_time applied
-    """    
-    grouped_gas = gen_gas.groupby(['bus', 'type', 'age']).agg({'carrier':'first','p_nom':sum, 'marginal_cost': 'mean','efficiency':'mean'}).reset_index()
-    grouped_gas['min_up_time'] = grouped_gas[['type','age']].apply(apply_ramping, axis=1)
-    grouped_gas = grouped_gas.set_index(grouped_gas['bus'] + '_' + grouped_gas['type'] + '_' + grouped_gas['age'])
-    return grouped_gas
 
