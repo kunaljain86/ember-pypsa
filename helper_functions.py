@@ -17,10 +17,12 @@ def load_data(input_data_sources:list, load_data_source:str) -> dict:
     input_data_dicts = []
     
     for source in input_data_sources:
-        if load_data_source == 'local':
+        if load_data_source == 'LOCAL':
             input_data_dicts.append(load_data_locally(source))
-        if load_data_source == 'remote':
+        if load_data_source == 'REMOTE':
             input_data_dicts.append(load_data_from_google_sheet(source))
+        if load_data_source != 'REMOTE' and load_data_source != 'LOCAL':
+            print("Please enter input as either 'LOCAL' or 'REMOTE'")
     data_dict = concat_data(input_data_dicts)
     return data_dict
 
@@ -72,6 +74,12 @@ def load_data_from_google_sheet(url):
             df.index = pd.to_datetime(df.index, format="%d/%m/%Y %H:%M:%S")
         dfs[wsheet_title] = df
 
+    # if googlesheets import used, save input worksheets to repo
+    doc_name = sheet.title
+    with pd.ExcelWriter('INPUT-' + doc_name + '.xlsx', engine='openpyxl') as writer:
+        for wks in sheet.worksheets():
+            df = wks.get_as_df()
+            df.to_excel(writer, sheet_name=wks.title, index=False)
     return dfs
 
 
